@@ -14,6 +14,7 @@ const profiler = require('screeps-profiler');
 profiler.enable();
 module.exports.loop = function() {
   profiler.wrap(function() {
+   
     // Memory Cleanup
     cleanMemory();
     
@@ -25,8 +26,17 @@ module.exports.loop = function() {
     
     updateRoomTerrainData();
     
+    if (Game.time % 100 === 0) {
+        console.log('Checking for hostiles');
+       
+        Object.values(Game.rooms).forEach(room => {
+            console.log(`Checking ${room.name}`);
+            updateRoomSourceSafety(room);
+        });
+    }
+    
         // Periodically update cost matrices for all rooms
-    if (Game.time % 1000 === 0) {
+    if (Game.time % 5000 === 0) {
         console.log('Updating cost matrices for all rooms...');
        
         for (const roomName in Game.rooms) {
@@ -34,7 +44,7 @@ module.exports.loop = function() {
         }
     }
     
-    if (Game.time % 1000 === 0) {
+    if (Game.time % 5000 === 0) {
         console.log('AVG Interval Reset');
         Memory.spawnTicks = [];
     }
@@ -109,9 +119,9 @@ function calculateDesiredCounts() {
     // Adjust these ratios as needed based on your gameplay strategy
     return {
         harvester: Math.floor(totalCreeps * 0.2),
-        builder: Math.floor(totalCreeps * 0.3),
+        builder: Math.floor(totalCreeps * 0.4),
         hauler: Math.floor(totalCreeps * 0.3),
-        upgrader: Math.ceil(totalCreeps * 0.2),
+        upgrader: Math.ceil(totalCreeps * 0.1),
     };
 }
 
@@ -235,36 +245,41 @@ function getBodyPartsForRole(role, energyAvailable) {
     // Calculate the energy cost for the base blueprint
     const baseCost = roleBlueprints[role].reduce((total, part) => total + partsCost[part], 0);
 
-
-    //console.log(`[getBodyPartsForRole] Role: ${role}, Energy Available: ${energyAvailable}, Base Cost: ${baseCost}`);
-    // Check if the base blueprint can be built with available energy
     if (energyAvailable < baseCost) {
-        //console.log(`[getBodyPartsForRole] Insufficient energy to spawn a viable ${role}. Required: ${baseCost}, Available: ${energyAvailable}`);
-        return null; // Return null to indicate not enough energy
+        //console.log(`Insufficient energy to spawn a viable ${role}. Required: ${baseCost}, Available: ${energyAvailable}`);
+        return null; // Not enough energy for even a base blueprint
     }
 
     // Build the base blueprint
-    for (const part of roleBlueprints[role]) {
+    roleBlueprints[role].forEach(part => {
         if (energyUsed + partsCost[part] <= energyAvailable) {
             body.push(part);
             energyUsed += partsCost[part];
         }
-    }
+    });
 
-    // Add additional parts as energy allows
-    while (energyUsed < energyAvailable) {
+    // Function to add parts in a balanced manner
+    const addPartsBalanced = () => {
+        const blueprint = roleBlueprints[role];
         let added = false;
-        for (const part of roleBlueprints[role]) {
+
+        for (let i = 0; i < blueprint.length && energyUsed < energyAvailable; i++) {
+            const part = blueprint[i];
             if (energyUsed + partsCost[part] <= energyAvailable) {
                 body.push(part);
                 energyUsed += partsCost[part];
                 added = true;
-                break; // Break to add parts evenly
+                // Cycle through parts in blueprint order for balance
+                i = (i + 1) % blueprint.length - 1;
             }
         }
-        if (!added) break; // Stop if no more parts can be added
-    }
-    //console.log(`[getBodyPartsForRole] Final Body: ${JSON.stringify(body)}, Energy Used: ${energyUsed}`);
+
+        return added;
+    };
+
+    // Continue adding parts in a balanced way until no more can be added
+    while (addPartsBalanced()) {}
+
     return body;
 }
 
@@ -289,6 +304,38 @@ function spawnClock() {
     }
 }
 
+global.resetCreepMemory = function() {
+    for (var name in Game.creeps) {
+        var creep = Game.creeps[name];
+        var role = creep.memory.role; // Capture the current role before resetting memory
+        
+        // Clear current memory
+        creep.memory = {};
+        
+        // Set initial memory state based on role
+        creep.memory.role = role; // Reassign role
+        // Add any other role-specific initialization as needed
+        switch (role) {
+            case 'harvester':
+                // Initialize memory specific to harvesters
+                break;
+            case 'upgrader':
+                // Initialize memory specific to upgraders
+                break;
+            case 'builder':
+                // Initialize memory specific to builders
+                break;
+            case 'hauler':
+                // Initialize memory specific to haulers
+                break;
+            // Add cases for other roles as necessary
+        }
+        
+        console.log(`Reset memory for ${name} (${role}).`);
+    }
+}
+
+
 
 // MAPPING METHODS
 //
@@ -296,7 +343,29 @@ function spawnClock() {
 //
 //
 
-function updateRoomTerrainData() {
+
+function updateRoomSourceSafety(room) {
+    if (!Memory.rooms) Memory.rooms = {};
+    if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
+
+    const hostiles = room.find(FIND_HOSTILE_CREEPS);
+    const sources = room.find(FIND_SOURCES);
+    const ruinsWithEnergy = room.find(FIND_RUINS, {
+        filter: (ruin) => ruin.store.getUsedCapacity(RESOURCE_ENERGY) > 0
+    });
+
+    const safeSources = sources.filter(source => 
+        !hostiles.some(hostile => source.pos.inRangeTo(hostile, 10))
+    ).map(source => source.id);
+
+    const safeRuins = ruinsWithEnergy.map(ruin => ruin.id);
+
+    Memory.rooms[room.name].safeSources = safeSources;
+    Memory.rooms[room.name].safeRuins = safeRuins;
+}
+
+
+function updateRoomTerrainData(room) {
     for (const roomName in Game.rooms) {
         const room = Game.rooms[roomName];
         // Check if we already have the terrain data stored
@@ -382,16 +451,22 @@ function manageConstruction() {
         return;
     }
     if (Memory.constructionRuns < 1) {
-        connectAllPOIs(room);
-        Memory.constructionRuns += 1;
+        connectSpawnToPOIs(room);
         
-    } else if (Memory.constructionRuns === 1 && activeSites < 20) {
-        placeRoadArraysSmall(room);
+    } else if (Memory.constructionRuns === 1 && room.controller.level === 2) {
+        placeContainerSites(room);
+         Memory.constructionRuns += 1;
         
     } else if (Memory.constructionRuns === 2 && activeSites < 20) {
+        placeRoadArraysSmall(room);
+        
+    } else if (Memory.constructionRuns === 3 && activeSites < 20) {
+        connectAllPOIs(room);
+        Memory.constructionRuns +=1;
+        
+    } else if (Memory.constructionRuns === 4 && activeSites < 20) {
         placeRoadArraysLarge(room);
-        //connectSpawnToPOIs(room);
-        //Memory.constructionRuns +=1;
+        
     }
 }
 
@@ -582,51 +657,130 @@ function placeRoadArraysSmall(room) {
     }
 }  
 
+function placeContainerSites(room) {
+    // Assuming there's only one spawn in the room for simplicity
+    const spawn = room.find(FIND_MY_SPAWNS)[0];
+    if (!spawn) return; // Exit if no spawn is found
 
-
-function connectSpawnToPOIs(room) {
     const sources = room.find(FIND_SOURCES);
-    const targets = [room.controller, ...sources];
-    const importantStructures = room.find(FIND_MY_STRUCTURES, {
-        filter: structure => structure.structureType !== STRUCTURE_ROAD && structure.structureType !== STRUCTURE_WALL
-    });
-    targets.push(...importantStructures);
+    sources.forEach(source => {
+        const path = PathFinder.search(spawn.pos, {pos: source.pos, range: 5}, {
+            // Do not consider using roads and avoid swamp tiles
+            plainCost: 1,
+            swampCost: 5,
+            roomCallback: function(roomName) {
+                let room = Game.rooms[roomName];
+                if (!room) return;
+                let costs = new PathFinder.CostMatrix();
 
-    targets.forEach(target => {
-        const path = PathFinder.search(Game.spawns['Spawn1'].pos, { pos: target.pos, range: 1 }, {
-            roomCallback: roomName => {
-                let costs = new PathFinder.CostMatrix;
-                room.find(FIND_STRUCTURES).forEach(struct => {
+                room.find(FIND_STRUCTURES).forEach(function(struct) {
                     if (struct.structureType === STRUCTURE_ROAD) {
+                        // Favor roads by setting their cost lower than plain tiles
                         costs.set(struct.pos.x, struct.pos.y, 1);
                     } else if (struct.structureType !== STRUCTURE_CONTAINER &&
                                (struct.structureType !== STRUCTURE_RAMPART ||
                                 !struct.my)) {
+                        // Avoid non-walkable structures
                         costs.set(struct.pos.x, struct.pos.y, 0xff);
                     }
                 });
+
+                return costs;
+            },
+        });
+
+        // Check if a path was found
+        if (path.path.length > 0) {
+            let targetTile = path.path[path.path.length - 1]; // The tile closest to the spawn within range
+            console.log(`Container Placed @ ${targetTile.pos}`);
+            // Check if the target tile is suitable (plain or swamp and not already occupied by a construction site or structure)
+            let terrain = room.getTerrain().get(targetTile.x, targetTile.y);
+            if ((terrain !== TERRAIN_MASK_WALL) && 
+                !room.lookForAt(LOOK_STRUCTURES, targetTile.x, targetTile.y).length && 
+                !room.lookForAt(LOOK_CONSTRUCTION_SITES, targetTile.x, targetTile.y).length) {
+                room.createConstructionSite(targetTile.x, targetTile.y, STRUCTURE_CONTAINER);
+            }
+        } else {
+            console.log('No suitable path found for placing a container near source.');
+        }
+    });
+}
+
+function connectSpawnToPOIs(room) {
+    // Ensure memory initialization for construction progress tracking
+    if (!Memory.constructionProgress) {
+        Memory.constructionProgress = { index: 0, completedTargets: [] };
+    }
+    let constructionProgress = Memory.constructionProgress;
+
+    // Define POIs: Room Controller, Sources, and specific structures
+    const sources = room.find(FIND_SOURCES);
+    const structures = room.find(FIND_MY_STRUCTURES, {
+        filter: (s) => [STRUCTURE_CONTAINER, STRUCTURE_EXTENSION].includes(s.structureType)
+    });
+    const targets = [room.controller, ...sources, ...structures];
+
+    if (constructionProgress.completedTargets.length >= targets.length) {
+        console.log("All targets connected. Incrementing construction runs.");
+        Memory.constructionRuns = (Memory.constructionRuns || 0) + 1;
+        Memory.constructionProgress = null; // Reset progress for future operations
+        return;
+    }
+
+    targets.forEach((target, index) => {
+        // Skip already completed targets
+        if (constructionProgress.completedTargets.includes(index)) return;
+
+        const path = PathFinder.search(Game.spawns['Spawn1'].pos, { pos: target.pos, range: 1 }, {
+            roomCallback: roomName => {
+                let costs = new PathFinder.CostMatrix();
+                // Adjust to ignore swamp costs, treating all non-wall tiles the same
+                room.find(FIND_STRUCTURES).forEach(struct => {
+                    if (struct.structureType !== STRUCTURE_CONTAINER &&
+                        struct.structureType !== STRUCTURE_RAMPART &&
+                        struct.structureType !== STRUCTURE_ROAD &&
+                        !struct.my) {
+                        // Set impassable structures as impassable
+                        costs.set(struct.pos.x, struct.pos.y, 0xff);
+                    }
+                });
+                // Consider terrain to ensure walls are impassable
+                let terrain = room.getTerrain();
+                for(let y = 0; y < 50; y++) {
+                    for(let x = 0; x < 50; x++) {
+                        if(terrain.get(x, y) === TERRAIN_MASK_WALL) {
+                            costs.set(x, y, 0xff);
+                        }
+                    }
+                }
                 return costs;
             }
         }).path;
 
-        path.forEach(pos => {
-            // Iterate over adjacent tiles to create a 3-tile wide road
-            for(let dx = -1; dx <= 1; dx++) {
-                for(let dy = -1; dy <= 1; dy++) {
-                    const newX = pos.x + dx;
-                    const newY = pos.y + dy;
-                    // Check if the tile is within room bounds
-                    if(newX >= 0 && newX < 50 && newY >= 0 && newY < 50) {
-                        const existing = room.lookForAt(LOOK_STRUCTURES, newX, newY).concat(room.lookForAt(LOOK_CONSTRUCTION_SITES, newX, newY));
-                        if (!existing.length) {
-                            room.createConstructionSite(newX, newY, STRUCTURE_ROAD);
-                        }
-                    }
-                }
+        // Place roads directly on the path for a single lane
+        path.forEach((pos, i) => {
+            const x = pos.x;
+            const y = pos.y;
+            if (room.createConstructionSite(x, y, STRUCTURE_ROAD) === ERR_FULL) {
+                // Early exit from forEach, pauses construction if limit reached
+                return;
+            }
+
+            if (i === path.length - 1) {
+                // Mark the target as completed after last path segment is processed
+                constructionProgress.completedTargets.push(index);
             }
         });
+
+        // Break early if construction sites limit reached
+        if (room.find(FIND_CONSTRUCTION_SITES).length >= 100) {
+            console.log(`Pausing construction due to site limit. Incomplete POIs:`, targets.length - constructionProgress.completedTargets.length);
+            return false; // Stop further forEach iteration
+        }
     });
-    console.log("Spawn network defined.")
+
+    // Update memory after iteration
+    Memory.constructionProgress = constructionProgress;
 }
 
 function connectAllPOIs(room) {

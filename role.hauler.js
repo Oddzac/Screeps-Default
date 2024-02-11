@@ -1,145 +1,119 @@
 var utility = require('a.utilities');
 var roleHauler = {
     run: function(creep) {
-        // First, manage any energy drop claims to ensure updated claims
         this.manageDroppedEnergyClaims(creep);
+        this.handleEnergyCollectionOrDelivery(creep);
+    },
 
-        // Assign a source if it's not already assigned or if the previous one is invalid
-        if (!creep.memory.assignedSourceId || !Game.getObjectById(creep.memory.assignedSourceId)) {
-            this.assignSource(creep);
-        }
-
-        // Explicitly manage state transitions based on the current situation
-        if (creep.memory.claimedDrop && creep.store.getUsedCapacity() < creep.store.getCapacity()) {
-            // Priority is given to collecting a claimed drop
-            this.moveToAndCollectClaimedDrop(creep);
-        } else if (creep.store.getUsedCapacity() > 0) {
-            // Once the hauler is carrying energy, it should deliver it
+    handleEnergyCollectionOrDelivery: function(creep) {
+        if (creep.store.getFreeCapacity() > 0) {
+            this.collectEnergy(creep);
+        } else {
             this.deliverEnergy(creep);
+        }
+    },
+
+    collectEnergy: function(creep) {
+        let target = this.findEnergyCollectionTarget(creep);
+        if (target) {
+            this.moveToAndCollectEnergy(creep, target);
         } else {
-            // If not actively hauling or claiming, either wait near the source or check for new drops
-            if (creep.memory.waitingForDrop) {
-                this.waitNearSource(creep);
-            } else {
-                this.checkForNearbyDroppedEnergy(creep);
-            }
+            this.waitStrategically(creep);
         }
     },
 
+    findEnergyCollectionTarget: function(creep) {
+        // Prioritize claimed drops, then significant dropped energy, tombstones, and containers
+        if (creep.memory.claimedDrop) {
+            let claimedTarget = Game.getObjectById(creep.memory.claimedDrop);
+            if (claimedTarget) return claimedTarget;
+        }
+        
+        let significantDrop = this.findSignificantDroppedEnergy(creep);
+        if (significantDrop) return significantDrop;
+        
+        let container = this.findClosestContainerWithEnergy(creep);
+        if (container) return container;
+        
+        return null;
+    },
 
-    assignSource: function(creep) {
-        var sources = creep.room.find(FIND_SOURCES);
-        var assignedSource = sources.reduce((leastCrowded, source) => {
-            var haulerCount = _.filter(Game.creeps, c => c.memory.role === 'hauler' && c.memory.assignedSourceId === source.id).length;
-            return haulerCount < leastCrowded.count ? {source: source, count: haulerCount} : leastCrowded;
-        }, {source: null, count: Infinity}).source;
-
-        if (assignedSource) {
-            creep.memory.assignedSourceId = assignedSource.id;
+    moveToAndCollectEnergy: function(creep, target) {
+        if (target instanceof Resource && creep.pickup(target) === ERR_NOT_IN_RANGE ||
+            target instanceof Tombstone && creep.withdraw(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE ||
+            target.structureType === STRUCTURE_CONTAINER && creep.withdraw(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            utility.moveToTarget(creep, target, 1);
+            creep.say('🔄️');
         }
     },
 
-    waitNearSource: function(creep) {
-        let source = Game.getObjectById(creep.memory.assignedSourceId);
-        if (source) {
-            let path = PathFinder.search(creep.pos, {pos: source.pos, range: 10});
-            let waitPosition = path.path[path.path.length - 1];
-            if (creep.pos.getRangeTo(waitPosition) > 0) {
-                creep.moveTo(waitPosition);
-                //utility.moveToWithCCM(creep, waitPosition);
-                creep.say('⏳');
-            }
-        }
-    },
-    
-    moveToAndCollectClaimedDrop: function(creep) {
-        var claimedDrop = Game.getObjectById(creep.memory.claimedDrop);
-        if (claimedDrop) {
-            if (creep.pickup(claimedDrop) === ERR_NOT_IN_RANGE) {
-                creep.moveTo(claimedDrop);
-                //utility.moveToWithCCM(creep, claimedDrop);
-                creep.say('🔄');
-            }
-        } else {
-            // Clear the claim if the drop no longer exists or has been collected
-            delete Memory.claimedDrops[creep.memory.claimedDrop];
-            delete creep.memory.claimedDrop;
-            creep.memory.waitingForDrop = true; // Return to waiting state
-        }
-    },
-    
     deliverEnergy: function(creep) {
-        var target = this.findEnergyDepositTarget(creep);
+        let target = this.findEnergyDepositTarget(creep);
         if (target && creep.transfer(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(target);
-            //utility.moveToWithCCM(creep, target);
+            utility.moveToTarget(creep, target, 1);
             creep.say('🚚');
         }
-        // After attempting delivery, if still carrying energy, continue to deliver
-        if (creep.store.getUsedCapacity() === 0) {
-            creep.memory.waitingForDrop = true; // Ready to collect more energy
-        }
     },
 
+    findSignificantDroppedEnergy: function(creep) {
+        // Merged logic for dropped resources and tombstones
+        return creep.pos.findClosestByPath(FIND_DROPPED_RESOURCES, {
+            filter: r => r.resourceType === RESOURCE_ENERGY && r.amount >= 50
+        }) || creep.pos.findClosestByPath(FIND_TOMBSTONES, {
+            filter: t => t.store[RESOURCE_ENERGY] >= 50
+        });
+    },
+
+    findClosestContainerWithEnergy: function(creep) {
+        // Simplified container search
+        return creep.pos.findClosestByPath(FIND_STRUCTURES, {
+            filter: s => s.structureType === STRUCTURE_CONTAINER && s.store[RESOURCE_ENERGY] > 0
+        });
+    },
+
+    waitStrategically: function(creep) {
+        // Simplified wait strategy
+        let source = creep.pos.findClosestByPath(FIND_SOURCES);
+        if (source) {
+            utility.moveToTarget(creep, source, 5); // Reduced range to save CPU on pathfinding
+            creep.say('🔎');
+        }
+    },
 
     findEnergyDepositTarget: function(creep) {
+        // Simplified energy deposit target search
         return creep.pos.findClosestByPath(FIND_MY_STRUCTURES, {
-            filter: (structure) => {
-                return (structure.structureType === STRUCTURE_SPAWN || 
-                        structure.structureType === STRUCTURE_EXTENSION ||
-                        structure.structureType === STRUCTURE_TOWER) &&
-                       structure.store.getFreeCapacity(RESOURCE_ENERGY) > 0;
-            }
+            filter: s => (s.structureType === STRUCTURE_SPAWN || s.structureType === STRUCTURE_EXTENSION || s.structureType === STRUCTURE_TOWER) &&
+                         s.store.getFreeCapacity(RESOURCE_ENERGY) > 0
         });
     },
 
-    checkForNearbyDroppedEnergy: function(creep) {
-        // Prevent all haulers from reacting to the same drop
-        var droppedEnergy = creep.pos.findClosestByPath(FIND_DROPPED_RESOURCES, {
-            filter: (resource) => resource.resourceType === RESOURCE_ENERGY && resource.amount >=5 && !Memory.claimedDrops[resource.id]
-        });
-        if (droppedEnergy) {
-            Memory.claimedDrops[droppedEnergy.id] = creep.id;
-            creep.memory.claimedDrop = droppedEnergy.id;
-            if (creep.pickup(droppedEnergy) === ERR_NOT_IN_RANGE) {
-                creep.moveTo(droppedEnergy);
-                //utility.moveToWithCCM(creep, droppedEnergy);
-                creep.say('🔄');
-            }
-        }
-    },
-    
     manageDroppedEnergyClaims: function(creep) {
-        // Clear claims for resources that no longer exist or have been picked up
-        for (let id in Memory.claimedDrops) {
-            if (!Game.getObjectById(id) || Game.getObjectById(id).amount === 0) {
-                delete Memory.claimedDrops[id];
+        // Optimized claim management
+        if (creep.memory.claimedDrop) {
+            let claimedDrop = Game.getObjectById(creep.memory.claimedDrop);
+            if (!claimedDrop || claimedDrop.amount === 0) {
+                delete Memory.claimedDrops[creep.memory.claimedDrop];
+                delete creep.memory.claimedDrop;
             }
-        }
-
-        if (creep.store.getUsedCapacity() === 0 && !creep.memory.claimedDrop) {
-            this.claimDroppedEnergy(creep);
-        } else if (creep.memory.claimedDrop && creep.store.getUsedCapacity() > 0) {
-            // Drop has been picked up, clear the claim
-            delete Memory.claimedDrops[creep.memory.claimedDrop];
-            delete creep.memory.claimedDrop;
+        } else {
+            // Attempt to claim if there's no current claim and capacity isn't full
+            if (creep.store.getFreeCapacity() > 0) {
+                this.claimDroppedEnergy(creep);
+            }
         }
     },
 
     claimDroppedEnergy: function(creep) {
-        var unclaimedDrops = creep.room.find(FIND_DROPPED_RESOURCES, {
-            filter: (resource) => resource.resourceType === RESOURCE_ENERGY && !Memory.claimedDrops[resource.id]
+        let unclaimedDrops = creep.room.find(FIND_DROPPED_RESOURCES, {
+            filter: r => r.resourceType === RESOURCE_ENERGY && r.amount >= 50 && (!Memory.claimedDrops[r.id] || Memory.claimedDrops[r.id] === creep.id)
         });
-        var closestDrop = creep.pos.findClosestByPath(unclaimedDrops);
+        let closestDrop = creep.pos.findClosestByPath(unclaimedDrops);
         if (closestDrop) {
-            Memory.claimedDrops[closestDrop.id] = creep.id; // Claim the drop for this creep
-            creep.memory.claimedDrop = closestDrop.id; // Mark the creep with the claimed drop
-            creep.moveTo(closestDrop);
-            //utility.moveToWithCCM(creep, closestDrop);
-            creep.say('🔄');
+            Memory.claimedDrops[closestDrop.id] = creep.id;
+            creep.memory.claimedDrop = closestDrop.id;
         }
-    },
-
+    }
 };
 
 module.exports = roleHauler;
