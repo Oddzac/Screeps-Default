@@ -25,10 +25,9 @@ module.exports.loop = function() {
         Memory.claimedDrops = {};
     }
     
-    
-    updateRoomTerrainData();
-    
     if (Game.time % 100 === 0) {
+        
+        // Source mapping for utility.chooseSource
         console.log('Checking for hostiles');
        
         Object.values(Game.rooms).forEach(room => {
@@ -37,16 +36,17 @@ module.exports.loop = function() {
         });
     }
     
-        // Periodically update cost matrices for all rooms
+
     if (Game.time % 5000 === 0) {
+        
+        // Update cost matrices for all rooms
         console.log('Updating cost matrices for all rooms...');
-       
+        updateRoomTerrainData();
         for (const roomName in Game.rooms) {
             cacheRoomCostMatrix(roomName); // Assuming this function updates the cost matrix
         }
-    }
-    
-    if (Game.time % 5000 === 0) {
+        
+        //Reset spawnClock average
         console.log('AVG Interval Reset');
         Memory.spawnTicks = [];
     }
@@ -100,12 +100,7 @@ function cleanMemory() {
             delete Memory.claimedDrops[id];
         }
     }
-    
-    for (let id in Memory.repairAssignments) {
-        if (!Game.getObjectById(id) || Game.getObjectById(id).amount === 0) {
-            delete Memory.repairAssignments[id];
-        }
-    }
+
 }
 
 
@@ -175,13 +170,9 @@ function manageCreepSpawning() {
     }
 }
 
+
+
 // MAPPING METHODS
-//
-//
-//
-//
-
-
 function updateRoomSourceSafety(room) {
     if (!Memory.rooms) Memory.rooms = {};
     if (!Memory.rooms[room.name]) Memory.rooms[room.name] = {};
